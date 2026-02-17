@@ -1,25 +1,20 @@
-- name: Install Sonar Scanner (latest from GitHub releases)
+- name: Install Sonar Scanner (latest from zipball)
   run: |
     set -euo pipefail
 
     api="https://api.github.com/repos/SonarSource/sonar-scanner-cli/releases/latest"
 
-    download_url=$(curl -fsSL "$api" \
-      | grep "browser_download_url" \
-      | grep "linux-x64.zip" \
-      | cut -d '"' -f 4)
+    zip_url=$(curl -fsSL "$api" | grep -oP '"zipball_url":\s*"\K[^"]+')
 
-    if [[ -z "$download_url" ]]; then
-      echo "Failed to resolve latest Sonar Scanner release"
-      exit 1
-    fi
+    echo "Downloading: $zip_url"
 
-    echo "Downloading from: $download_url"
-
-    curl -fsSL "$download_url" -o /tmp/sonar-scanner.zip
+    curl -L "$zip_url" -o /tmp/sonar-scanner.zip
 
     sudo unzip -q /tmp/sonar-scanner.zip -d /opt
 
-    sudo ln -sfn /opt/sonar-scanner-*/bin/sonar-scanner /usr/local/bin/sonar-scanner
+    # The extracted folder name is dynamic: SonarSource-sonar-scanner-cli-<commit>
+    dir=$(find /opt -maxdepth 1 -type d -name "SonarSource-sonar-scanner-cli-*")
+
+    sudo ln -sfn "$dir/bin/sonar-scanner" /usr/local/bin/sonar-scanner
 
     sonar-scanner --version
