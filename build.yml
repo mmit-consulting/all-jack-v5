@@ -1,22 +1,22 @@
-- name: Install Sonar Scanner CLI
+- name: DEBUG Sonar installation
   run: |
     set -euo pipefail
 
     VERSION="8.0.1.6346"
     URL="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${VERSION}.zip"
 
-    echo "Downloading Sonar Scanner ${VERSION}..."
     curl -fL "$URL" -o /tmp/sonar-scanner.zip
 
-    echo "Installing to /opt/sonar-scanner..."
-    sudo rm -rf /opt/sonar-scanner || true
+    echo "===== ZIP CONTENT ====="
+    unzip -l /tmp/sonar-scanner.zip | head -n 20
+
     sudo unzip -q /tmp/sonar-scanner.zip -d /opt
 
-    # The archive extracts to /opt/sonar-scanner-<version>
-    sudo mv /opt/sonar-scanner-${VERSION} /opt/sonar-scanner
+    echo "===== /opt CONTENT ====="
+    ls -la /opt
 
-    # Make binary globally available
-    sudo ln -sfn /opt/sonar-scanner/bin/sonar-scanner /usr/local/bin/sonar-scanner
+    echo "===== FIND sonar-scanner binary ====="
+    find /opt -name "sonar-scanner" -type f
 
-    # Verify installation
-    sonar-scanner --version
+    echo "===== FIND bin folders ====="
+    find /opt -type d -name "bin"
