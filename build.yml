@@ -1,27 +1,15 @@
-- name: Install Sonar Scanner (latest)
+- name: Install Sonar Scanner
   run: |
     set -euo pipefail
 
-    base="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli"
+    url="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-latest-linux-x64.zip"
 
-    # Get latest version by listing directory and extracting highest version
-    latest="$(curl -fsSL "$base/" \
-      | grep -oP 'sonar-scanner-cli-\K[0-9.]+(?=-linux-x64\.zip)' \
-      | sort -V \
-      | tail -n 1)"
+    echo "Downloading Sonar Scanner from: $url"
+    curl -fsSL "$url" -o /tmp/sonar-scanner.zip
 
-    if [[ -z "$latest" ]]; then
-      echo "Failed to detect latest Sonar Scanner version"
-      exit 1
-    fi
+    sudo unzip -q /tmp/sonar-scanner.zip -d /opt
 
-    echo "Latest Sonar Scanner: $latest"
-
-    file="sonar-scanner-cli-${latest}-linux-x64.zip"
-
-    curl -fsSL "$base/$file" -o "/tmp/$file"
-
-    sudo unzip -q "/tmp/$file" -d /opt
-    sudo ln -sfn /opt/sonar-scanner-${latest}-linux-x64/bin/sonar-scanner /usr/local/bin/sonar-scanner
+    # The extracted folder already contains the version number
+    sudo ln -sfn /opt/sonar-scanner-*/bin/sonar-scanner /usr/local/bin/sonar-scanner
 
     sonar-scanner --version
