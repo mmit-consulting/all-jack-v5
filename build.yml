@@ -3,61 +3,99 @@ name: Build Java linux CI image
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 defaults:
   run:
     shell: bash
 
 jobs:
   build:
-    name: Build image snapshot (java-ci)
     runs-on: LinuxImagesBuilder
 
-    # Your custom images builder inputs (as seen in your screenshot)
-    # Keep/remove depending on your GHE custom images feature requirements.
+    # Keep/remove depending on your GHE custom images feature requirements
     snapshot:
       image-name: java-ci
       version: 1.*
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      # ---------------------------
+      # Manual checkout (no actions/checkout)
+      # ---------------------------
+      - name: Checkout repository (manual)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
 
-      # Base packages (single layer, hardened, clean cache)
-      - name: Install base tooling (apt)
+          # Ensure workspace is clean
+          rm -rf .git || true
+
+          git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Fetch the ref that triggered the workflow
+          git fetch -q --depth=1 origin "${GITHUB_REF}"
+          git checkout -q FETCH_HEAD
+
+          # Avoid "dubious ownership" on some hardened runners
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      # ---------------------------
+      # Base OS deps
+      # ---------------------------
+      - name: Install base packages
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            wget \
-            unzip \
-            git \
-            ant \
-            maven
+            ca-certificates curl wget unzip tar git jq
           sudo rm -rf /var/lib/apt/lists/*
 
-      # JDKs - official action (Temurin)
-      - name: Setup JDK 11 (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "11"
+      # ---------------------------
+      # JDKs 11/17/21 (latest GA each time) - via Adoptium API
+      # No setup-java action used.
+      # ---------------------------
+      - name: Install OpenJDK 11/17/21 (latest from Adoptium)
+        run: |
+          set -euo pipefail
 
-      - name: Setup JDK 17 (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+          install_dir="/opt/jdks"
+          sudo mkdir -p "$install_dir"
 
-      - name: Setup JDK 21 (Temurin)
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
+          install_jdk() {
+            local major="$1"
+            local api="https://api.adoptium.net/v3/assets/latest/${major}/ga?architecture=x64&heap_size=normal&image_type=jdk&jvm_impl=hotspot&os=linux&vendor=eclipse"
+            local url
+            url="$(curl -fsSL "$api" | jq -r '.[0].binary.package.link')"
+
+            if [[ -z "$url" || "$url" == "null" ]]; then
+              echo "Failed to resolve Adoptium download URL for JDK ${major}" >&2
+              exit 1
+            fi
+
+            echo "JDK ${major} URL: $url"
+
+            tmp="/tmp/jdk${major}.tar.gz"
+            curl -fsSL "$url" -o "$tmp"
+
+            sudo rm -rf "${install_dir}/jdk-${major}" || true
+            sudo mkdir -p "${install_dir}/jdk-${major}"
+
+            # Tar contains a top-level directory, extract then normalize path
+            sudo tar -xzf "$tmp" -C "${install_dir}/jdk-${major}" --strip-components=1
+            rm -f "$tmp"
+          }
+
+          install_jdk 11
+          install_jdk 17
+          install_jdk 21
+
+          # Export JAVA_HOME_* like setup-java usually does (so your scripts keep working)
+          {
+            echo "JAVA_HOME_11_X64=${install_dir}/jdk-11"
+            echo "JAVA_HOME_17_X64=${install_dir}/jdk-17"
+            echo "JAVA_HOME_21_X64=${install_dir}/jdk-21"
+            echo "PATH=${install_dir}/jdk-21/bin:${PATH}"
+          } >> "$GITHUB_ENV"
 
       - name: Verify JDK installations
         run: |
@@ -74,64 +112,129 @@ jobs:
           "${JAVA_HOME_21_X64}/bin/java" -version
           "${JAVA_HOME_21_X64}/bin/javac" -version
 
-      # Gradle - official Gradle action (latest)
-      - name: Setup Gradle (latest)
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: latest
-
-      # JFrog CLI - official publisher action (latest)
-      - name: Setup JFrog CLI (latest)
-        uses: jfrog/setup-jfrog-cli@v4
-
-      # Sonar Scanner - latest, robust resolution (no HTML scraping)
-      - name: Install Sonar Scanner (latest from GitHub releases)
+      # ---------------------------
+      # Maven (latest release each run) - no marketplace action
+      # Source of truth: Maven Central metadata
+      # ---------------------------
+      - name: Install Maven (latest release)
         run: |
           set -euo pipefail
 
-          api="https://api.github.com/repos/SonarSource/sonar-scanner-cli/releases/latest"
-          url="$(curl -fsSL "$api" \
-            | grep -Eo 'https://[^"]+sonar-scanner-cli-[0-9.]+-linux-x64\.zip' \
-            | head -n 1)"
+          meta="https://repo1.maven.org/maven2/org/apache/maven/apache-maven/maven-metadata.xml"
+          ver="$(curl -fsSL "$meta" | grep -oP '(?<=<release>)[^<]+' | head -n1)"
 
-          if [[ -z "$url" ]]; then
-            echo "Could not resolve latest Sonar Scanner zip from GitHub releases" >&2
+          if [[ -z "$ver" ]]; then
+            echo "Failed to resolve latest Maven version from metadata" >&2
             exit 1
           fi
 
-          echo "Downloading: $url"
-          curl -fsSL "$url" -o /tmp/sonar-scanner.zip
-          sudo unzip -q /tmp/sonar-scanner.zip -d /opt
-          sudo ln -sf /opt/sonar-scanner-*/bin/sonar-scanner /usr/local/bin/sonar-scanner
+          echo "Latest Maven: $ver"
 
-      # Sanity checks (important when you intentionally float versions)
-      - name: Verify toolchain
-        run: |
-          set -euo pipefail
-          echo "Maven:"
+          base_primary="https://dlcdn.apache.org/maven/maven-3/${ver}/binaries"
+          base_fallback="https://archive.apache.org/dist/maven/maven-3/${ver}/binaries"
+          archive="apache-maven-${ver}-bin.tar.gz"
+
+          tmp="/tmp/${archive}"
+          if ! curl -fsSL "${base_primary}/${archive}" -o "$tmp"; then
+            curl -fsSL "${base_fallback}/${archive}" -o "$tmp"
+          fi
+
+          sudo rm -rf /opt/maven || true
+          sudo mkdir -p /opt/maven
+          sudo tar -xzf "$tmp" -C /opt/maven --strip-components=1
+          rm -f "$tmp"
+
+          sudo ln -sf /opt/maven/bin/mvn /usr/local/bin/mvn
           mvn -v
 
-          echo "Gradle:"
+      # ---------------------------
+      # Gradle (latest) - official Gradle distribution endpoint
+      # ---------------------------
+      - name: Install Gradle (latest)
+        run: |
+          set -euo pipefail
+
+          url="https://services.gradle.org/distributions/gradle-latest-bin.zip"
+          tmp="/tmp/gradle-latest.zip"
+
+          curl -fsSL "$url" -o "$tmp"
+
+          sudo rm -rf /opt/gradle || true
+          sudo mkdir -p /opt/gradle
+          sudo unzip -q "$tmp" -d /opt/gradle
+          rm -f "$tmp"
+
+          # The zip extracts to gradle-<version>
+          sudo ln -sfn /opt/gradle/gradle-*/bin/gradle /usr/local/bin/gradle
           gradle -v
 
-          echo "JFrog CLI:"
-          jf --version || jfrog --version || true
+      # ---------------------------
+      # JFrog CLI (latest) - official installer script
+      # ---------------------------
+      - name: Install JFrog CLI (latest)
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          pushd "$tmpdir" >/dev/null
+          curl -fsSL https://install-cli.jfrog.io | sh
+          sudo mv -f jf /usr/local/bin/jf
+          popd >/dev/null
+          rm -rf "$tmpdir"
+          jf --version
 
-          echo "Sonar Scanner:"
+      # ---------------------------
+      # Sonar Scanner (latest) - GitHub releases API (robust)
+      # ---------------------------
+- name: Install Sonar Scanner (latest)
+  run: |
+    set -euo pipefail
+
+    base="https://binaries.sonarsource.com/Distribution/sonar-scanner-cli"
+
+    # Get latest version by listing directory and extracting highest version
+    latest="$(curl -fsSL "$base/" \
+      | grep -oP 'sonar-scanner-cli-\K[0-9.]+(?=-linux-x64\.zip)' \
+      | sort -V \
+      | tail -n 1)"
+
+    if [[ -z "$latest" ]]; then
+      echo "Failed to detect latest Sonar Scanner version"
+      exit 1
+    fi
+
+    echo "Latest Sonar Scanner: $latest"
+
+    file="sonar-scanner-cli-${latest}-linux-x64.zip"
+
+    curl -fsSL "$base/$file" -o "/tmp/$file"
+
+    sudo unzip -q "/tmp/$file" -d /opt
+    sudo ln -sfn /opt/sonar-scanner-${latest}-linux-x64/bin/sonar-scanner /usr/local/bin/sonar-scanner
+
+    sonar-scanner --version
+
+
+      # ---------------------------
+      # Final sanity check
+      # ---------------------------
+      - name: Verify full toolchain
+        run: |
+          set -euo pipefail
+          mvn -v
+          gradle -v
+          jf --version
           sonar-scanner --version
 
       # ---------------------------
-      # Build + publish your custom image
+      # Build + publish your GHE custom image (placeholder)
+      # Replace with your actual builder commands/tools.
       # ---------------------------
-      # Replace this section with your actual custom image build/publish commands.
-      # Examples: packer build, docker build/push, or GHE custom image tooling.
       - name: Build custom image (placeholder)
         run: |
           set -euo pipefail
-          echo "TODO: build the custom image here"
-          echo "Install steps already executed above; now bake into the image."
+          echo "TODO: bake the filesystem into a GHE custom runner image here."
 
       - name: Publish custom image (placeholder)
         run: |
           set -euo pipefail
-          echo "TODO: publish/attach the built image to GHE custom images here"
+          echo "TODO: publish/attach the built image to GHE custom images here."
