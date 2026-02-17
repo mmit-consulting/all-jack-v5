@@ -1,0 +1,137 @@
+name: Build Java linux CI image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build image snapshot (java-ci)
+    runs-on: LinuxImagesBuilder
+
+    # Your custom images builder inputs (as seen in your screenshot)
+    # Keep/remove depending on your GHE custom images feature requirements.
+    snapshot:
+      image-name: java-ci
+      version: 1.*
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Base packages (single layer, hardened, clean cache)
+      - name: Install base tooling (apt)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            wget \
+            unzip \
+            git \
+            ant \
+            maven
+          sudo rm -rf /var/lib/apt/lists/*
+
+      # JDKs - official action (Temurin)
+      - name: Setup JDK 11 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+
+      - name: Setup JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Verify JDK installations
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME_11_X64: ${JAVA_HOME_11_X64}"
+          "${JAVA_HOME_11_X64}/bin/java" -version
+          "${JAVA_HOME_11_X64}/bin/javac" -version
+
+          echo "JAVA_HOME_17_X64: ${JAVA_HOME_17_X64}"
+          "${JAVA_HOME_17_X64}/bin/java" -version
+          "${JAVA_HOME_17_X64}/bin/javac" -version
+
+          echo "JAVA_HOME_21_X64: ${JAVA_HOME_21_X64}"
+          "${JAVA_HOME_21_X64}/bin/java" -version
+          "${JAVA_HOME_21_X64}/bin/javac" -version
+
+      # Gradle - official Gradle action (latest)
+      - name: Setup Gradle (latest)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: latest
+
+      # JFrog CLI - official publisher action (latest)
+      - name: Setup JFrog CLI (latest)
+        uses: jfrog/setup-jfrog-cli@v4
+
+      # Sonar Scanner - latest, robust resolution (no HTML scraping)
+      - name: Install Sonar Scanner (latest from GitHub releases)
+        run: |
+          set -euo pipefail
+
+          api="https://api.github.com/repos/SonarSource/sonar-scanner-cli/releases/latest"
+          url="$(curl -fsSL "$api" \
+            | grep -Eo 'https://[^"]+sonar-scanner-cli-[0-9.]+-linux-x64\.zip' \
+            | head -n 1)"
+
+          if [[ -z "$url" ]]; then
+            echo "Could not resolve latest Sonar Scanner zip from GitHub releases" >&2
+            exit 1
+          fi
+
+          echo "Downloading: $url"
+          curl -fsSL "$url" -o /tmp/sonar-scanner.zip
+          sudo unzip -q /tmp/sonar-scanner.zip -d /opt
+          sudo ln -sf /opt/sonar-scanner-*/bin/sonar-scanner /usr/local/bin/sonar-scanner
+
+      # Sanity checks (important when you intentionally float versions)
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          echo "Maven:"
+          mvn -v
+
+          echo "Gradle:"
+          gradle -v
+
+          echo "JFrog CLI:"
+          jf --version || jfrog --version || true
+
+          echo "Sonar Scanner:"
+          sonar-scanner --version
+
+      # ---------------------------
+      # Build + publish your custom image
+      # ---------------------------
+      # Replace this section with your actual custom image build/publish commands.
+      # Examples: packer build, docker build/push, or GHE custom image tooling.
+      - name: Build custom image (placeholder)
+        run: |
+          set -euo pipefail
+          echo "TODO: build the custom image here"
+          echo "Install steps already executed above; now bake into the image."
+
+      - name: Publish custom image (placeholder)
+        run: |
+          set -euo pipefail
+          echo "TODO: publish/attach the built image to GHE custom images here"
